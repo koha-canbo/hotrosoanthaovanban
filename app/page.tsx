@@ -218,7 +218,13 @@ export default function HomePage() {
       addStatus("✓ Đã nhận kết quả từ AI", "done");
 
       // Step 3: Clean AI output + Inject into template
-      const cleanedText = cleanGeneratedHtml(result.generated_text);
+      let cleanedText = cleanGeneratedHtml(result.generated_text);
+      
+      // Fallback if cleaning somehow erased everything
+      if (!cleanedText || cleanedText.trim() === "") {
+        cleanedText = result.generated_text || "<p><em>Lỗi: AI trả về kết quả rỗng. Vui lòng thử lại.</em></p>";
+      }
+
       if (documentType === "custom") {
         setEditorContent(cleanedText);
       } else {
