@@ -18,13 +18,17 @@ async def get_notebooklm_client():
     storage_env = os.environ.get("NOTEBOOKLM_STORAGE_STATE")
     if storage_env:
         try:
-            # Vercel/Render: write the state to a temp file
-            temp_path = Path(tempfile.gettempdir()) / "notebooklm_state.json"
-            with open(temp_path, "w", encoding="utf-8") as f:
+            # Force write to the default path that notebooklm-py expects
+            default_profile_dir = Path.home() / ".notebooklm" / "profiles" / "default"
+            default_profile_dir.mkdir(parents=True, exist_ok=True)
+            
+            storage_path = default_profile_dir / "storage_state.json"
+            with open(storage_path, "w", encoding="utf-8") as f:
                 f.write(storage_env)
-            return await NotebookLMClient.from_storage(storage_path=temp_path)
+                
+            return await NotebookLMClient.from_storage()
         except Exception as e:
-            print(f"Warning: Failed to use NOTEBOOKLM_STORAGE_STATE env var: {e}")
+            print(f"Warning: Failed to write NOTEBOOKLM_STORAGE_STATE: {e}")
             
     # Fallback to default local storage
     return await NotebookLMClient.from_storage()
