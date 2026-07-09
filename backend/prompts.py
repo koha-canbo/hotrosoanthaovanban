@@ -101,6 +101,7 @@ def build_generation_prompt(user_prompt: str, document_type: str, stage1_data: s
 
 [HÀNH ĐỘNG]
 {action_text}
+BẮT BUỘC TRẢ VỀ KẾT QUẢ. Tuyệt đối không được trả về khoảng trắng hay chuỗi rỗng. Nếu không thể tạo toàn bộ văn bản, hãy tạo một bản nháp cơ bản nhất.
 """)
     
     return "\n".join(parts)

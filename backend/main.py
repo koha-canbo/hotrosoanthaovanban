@@ -46,14 +46,16 @@ def clean_ai_html_output(text: str) -> str:
 
     # 1. Strip markdown code blocks (```html ... ```)
     match = re.search(r"```(?:html)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
-    if match:
+    if match and match.group(1).strip():
         text = match.group(1).strip()
     else:
         # Strip conversational text before/after the HTML
         start_idx = text.find("<")
         end_idx = text.rfind(">")
         if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            text = text[start_idx:end_idx+1].strip()
+            stripped = text[start_idx:end_idx+1].strip()
+            if stripped:
+                text = stripped
 
     # 2. FORCE replace forbidden terms — normal case globally
     replacements = [
