@@ -3,6 +3,8 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import LeftPane from "@/components/left-pane/LeftPane";
 import RightPane from "@/components/right-pane/RightPane";
+import LoginPage from "@/components/LoginPage";
+import { useAuth } from "@/components/AuthProvider";
 import { type StatusMessage } from "@/components/left-pane/StatusStream";
 import { type SourceItem } from "@/components/left-pane/SourceManager";
 import { type RefineChatMessage } from "@/components/left-pane/RefineChat";
@@ -39,6 +41,8 @@ function createRefineMsg(role: "user" | "assistant", text: string): RefineChatMe
 }
 
 export default function HomePage() {
+  const { user, loading, signOut } = useAuth();
+
   // ─── State ──────────────────────────────────────────────────────────────
   const [files, setFiles] = useState<File[]>([]);
   const [sources, setSources] = useState<SourceItem[]>([]);
@@ -360,9 +364,40 @@ export default function HomePage() {
   const sourceName = sources.length > 0 ? sources[0].name.replace(/\.[^/.]+$/, "") : "van_ban";
   const exportFilename = `XuanLanh_${sourceName}.docx`;
 
+  // ─── Auth Gate ──────────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div className="login-loading">
+        <div className="login-loading-spinner" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginPage />;
+  }
+
   // ─── Render ─────────────────────────────────────────────────────────────
   return (
     <main className="split-layout">
+      {/* User bar */}
+      <div style={{ position: 'fixed', top: 12, right: 16, zIndex: 50 }}>
+        <div className="user-bar">
+          {user.photoURL && (
+            <img
+              src={user.photoURL}
+              alt=""
+              className="user-avatar"
+              referrerPolicy="no-referrer"
+            />
+          )}
+          <span className="user-name">{user.displayName || user.email}</span>
+          <button className="user-signout" onClick={signOut}>
+            Đăng xuất
+          </button>
+        </div>
+      </div>
+
       <LeftPane
         files={files}
         onFilesChange={setFiles}

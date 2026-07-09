@@ -2,6 +2,8 @@ import os
 import shutil
 import uuid
 import tempfile
+import json
+from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -10,6 +12,22 @@ from typing import Optional, List
 
 # Import notebooklm-py
 from notebooklm.client import NotebookLMClient
+
+# Helper for deployment authentication
+async def get_notebooklm_client():
+    storage_env = os.environ.get("NOTEBOOKLM_STORAGE_STATE")
+    if storage_env:
+        try:
+            # Vercel/Render: write the state to a temp file
+            temp_path = Path(tempfile.gettempdir()) / "notebooklm_state.json"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(storage_env)
+            return await NotebookLMClient.from_storage(storage_path=temp_path)
+        except Exception as e:
+            print(f"Warning: Failed to use NOTEBOOKLM_STORAGE_STATE env var: {e}")
+            
+    # Fallback to default local storage
+    return await NotebookLMClient.from_storage()
 
 # Import prompts
 from prompts import build_generation_prompt, build_refinement_prompt, EXTRACTION_PROMPT
@@ -243,7 +261,7 @@ async def upload_file(file: UploadFile = File(...)):
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        async with await NotebookLMClient.from_storage() as client:
+        async with await get_notebooklm_client() as client:
             nb_id = await session.ensure_notebook(client)
 
             print(f"Uploading {file.filename} to notebook {nb_id}...")
@@ -287,7 +305,7 @@ async def add_text_source(request: AddTextRequest):
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(request.text)
 
-        async with await NotebookLMClient.from_storage() as client:
+        async with await get_notebooklm_client() as client:
             nb_id = await session.ensure_notebook(client)
 
             print(f"Adding text source '{title}' to notebook {nb_id}...")
@@ -324,7 +342,7 @@ async def add_url_source(request: AddUrlRequest):
         raise HTTPException(status_code=400, detail="URL cannot be empty")
 
     try:
-        async with await NotebookLMClient.from_storage() as client:
+        async with await get_notebooklm_client() as client:
             nb_id = await session.ensure_notebook(client)
 
             print(f"Adding URL source '{request.url}' to notebook {nb_id}...")
@@ -369,7 +387,7 @@ async def generate_document(request: GenerateRequest):
     nb_id = request.notebook_id or session.notebook_id
 
     try:
-        async with await NotebookLMClient.from_storage() as client:
+        async with await get_notebooklm_client() as client:
             if not nb_id:
                 nb_id = await session.ensure_notebook(client)
 
@@ -435,7 +453,7 @@ async def refine_document(request: RefineRequest):
     conv_id = request.conversation_id or session.conversation_id
 
     try:
-        async with await NotebookLMClient.from_storage() as client:
+        async with await get_notebooklm_client() as client:
             if not nb_id:
                 nb_id = await session.ensure_notebook(client)
 
