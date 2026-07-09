@@ -2,40 +2,26 @@ import os
 import shutil
 import uuid
 import tempfile
-import json
+import re
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
+import httpx
+from bs4 import BeautifulSoup
 
-# Import notebooklm-py
-from notebooklm.client import NotebookLMClient
+# Import Gemini SDK
+import google.generativeai as genai
 
-# Helper for deployment authentication
-async def get_notebooklm_client():
-    storage_env = os.environ.get("NOTEBOOKLM_STORAGE_STATE")
-    if storage_env:
-        try:
-            # Force write to the default path that notebooklm-py expects
-            default_profile_dir = Path.home() / ".notebooklm" / "profiles" / "default"
-            default_profile_dir.mkdir(parents=True, exist_ok=True)
-            
-            storage_path = default_profile_dir / "storage_state.json"
-            with open(storage_path, "w", encoding="utf-8") as f:
-                f.write(storage_env)
-                
-            return await NotebookLMClient.from_storage()
-        except Exception as e:
-            print(f"Warning: Failed to write NOTEBOOKLM_STORAGE_STATE: {e}")
-            
-    # Fallback to default local storage
-    return await NotebookLMClient.from_storage()
+# Setup Gemini
+# The API key must be set in the environment variable GEMINI_API_KEY
+API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if API_KEY:
+    genai.configure(api_key=API_KEY)
 
 # Import prompts
-from prompts import build_generation_prompt, build_refinement_prompt, EXTRACTION_PROMPT
-import re
+from prompts import build_generation_prompt, build_refinement_prompt
 
 def clean_ai_html_output(text: str) -> str:
     """
@@ -75,13 +61,11 @@ def clean_ai_html_output(text: str) -> str:
         text = re.sub(pattern, replacement, text)
 
     # 3. FORCE 1.27cm indent + justify on <p> tags OUTSIDE tables
-    # Extract table blocks first, process <p> tags, then reassemble
     table_blocks = []
     TABLE_PH = "___TABLE_BLOCK___"
 
     def stash_table(m):
         block = m.group(0)
-        # Capitalize "Công an tỉnh Đắk Lắk" ONLY in the very first table
         if len(table_blocks) == 0:
             block = re.sub(r"Công an tỉnh Đắk Lắk", "CÔNG AN TỈNH ĐẮK LẮK", block, flags=re.IGNORECASE)
         table_blocks.append(block)
@@ -118,11 +102,11 @@ def clean_ai_html_output(text: str) -> str:
 
 app = FastAPI(
     title="Decree 30 Document Generator API",
-    description="API sinh văn bản hành chính theo Nghị định 30/2020/NĐ-CP, tích hợp Google NotebookLM.",
-    version="3.0.0",
+    description="API sinh văn bản hành chính theo Nghị định 30/2020/NĐ-CP, sử dụng Google Gemini API.",
+    version="4.0.0",
 )
 
-# CORS - allow frontend from any domain (Vercel, Localhost, etc.)
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -135,32 +119,24 @@ app.add_middleware(
 # ─── Session State ─────────────────────────────────────────────────────────────
 
 class SessionState:
-    """In-memory session state for active notebook and conversation."""
+    """In-memory session state for active sources and conversation."""
     def __init__(self):
-        self.notebook_id: Optional[str] = None
-        self.conversation_id: Optional[str] = None
-        self.sources: List[dict] = []  # Track added sources [{id, type, name, preview}]
+        self.sources: List[dict] = []
+        self.chat = None
 
-    async def ensure_notebook(self, client) -> str:
-        """Create or return the active notebook."""
-        if not self.notebook_id:
-            notebook_name = f"Decree30-{uuid.uuid4().hex[:8]}"
-            nb = await client.notebooks.create(notebook_name)
-            self.notebook_id = nb.id
-        return self.notebook_id
-
-    def add_source(self, source_id: str, source_type: str, name: str, preview: str = ""):
+    def add_source(self, source_id: str, source_type: str, name: str, preview: str = "", file_name: str = None, content: str = None):
         self.sources.append({
             "id": source_id,
             "type": source_type,
             "name": name,
             "preview": preview[:200] if preview else "",
+            "file_name": file_name, # The genai.File.name
+            "content": content
         })
 
     def reset(self):
-        self.notebook_id = None
-        self.conversation_id = None
         self.sources = []
+        self.chat = None
 
 
 session = SessionState()
@@ -174,11 +150,9 @@ class UploadResponse(BaseModel):
     notebook_id: str
     source_id: str
 
-
 class AddTextRequest(BaseModel):
     text: str
     title: Optional[str] = None
-
 
 class AddTextResponse(BaseModel):
     message: str
@@ -186,10 +160,8 @@ class AddTextResponse(BaseModel):
     notebook_id: str
     title: str
 
-
 class AddUrlRequest(BaseModel):
     url: str
-
 
 class AddUrlResponse(BaseModel):
     message: str
@@ -197,30 +169,25 @@ class AddUrlResponse(BaseModel):
     notebook_id: str
     url: str
 
-
 class SourceInfo(BaseModel):
     id: str
     type: str
     name: str
     preview: str
 
-
 class SourceListResponse(BaseModel):
     notebook_id: Optional[str]
     sources: List[SourceInfo]
-
 
 class GenerateRequest(BaseModel):
     prompt: str
     document_type: str
     notebook_id: Optional[str] = None
 
-
 class GenerateResponse(BaseModel):
     generated_text: str
     notebook_id: str
     conversation_id: Optional[str] = None
-
 
 class RefineRequest(BaseModel):
     instruction: str
@@ -229,12 +196,10 @@ class RefineRequest(BaseModel):
     notebook_id: Optional[str] = None
     conversation_id: Optional[str] = None
 
-
 class RefineResponse(BaseModel):
     refined_text: str
     notebook_id: str
     conversation_id: Optional[str] = None
-
 
 class ResetResponse(BaseModel):
     message: str
@@ -246,9 +211,9 @@ class ResetResponse(BaseModel):
 async def health_check():
     return {
         "status": "ok",
-        "service": "Decree30 API",
-        "notebook_id": session.notebook_id,
+        "service": "Decree30 Gemini API",
         "sources_count": len(session.sources),
+        "api_key_configured": bool(os.environ.get("GEMINI_API_KEY"))
     }
 
 
@@ -257,31 +222,38 @@ async def health_check():
 @app.post("/api/upload", response_model=UploadResponse)
 async def upload_file(file: UploadFile = File(...)):
     """
-    Upload a reference file (PDF, TXT, DOCX) to NotebookLM.
-    Creates a new notebook if none exists, or reuses the active one.
+    Upload a reference file. Uses Gemini File API for PDF/TXT.
+    Extracts text locally for DOCX.
     """
+    if not os.environ.get("GEMINI_API_KEY"):
+        raise HTTPException(status_code=500, detail="Chưa cấu hình GEMINI_API_KEY. Vui lòng thêm biến môi trường này.")
+
     temp_dir = tempfile.mkdtemp()
     file_path = os.path.join(temp_dir, file.filename)
+    source_id = uuid.uuid4().hex[:8]
 
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        async with await get_notebooklm_client() as client:
-            nb_id = await session.ensure_notebook(client)
+        if file.filename.lower().endswith(".docx"):
+            import docx
+            doc = docx.Document(file_path)
+            fullText = [para.text for para in doc.paragraphs]
+            content = '\n'.join(fullText)
+            session.add_source(source_id, "file", file.filename, content[:200], content=content)
+        else:
+            # For PDF, TXT, CSV, etc.
+            print(f"Uploading {file.filename} to Gemini...")
+            genai_file = genai.upload_file(file_path, display_name=file.filename)
+            session.add_source(source_id, "file", file.filename, "Tài liệu được tải lên Gemini (PDF/TXT)", file_name=genai_file.name)
 
-            print(f"Uploading {file.filename} to notebook {nb_id}...")
-            source = await client.sources.add_file(nb_id, file_path, wait=True)
-            source_id = getattr(source, 'id', str(source))
-
-            session.add_source(source_id, "file", file.filename)
-
-            return UploadResponse(
-                message=f"File '{file.filename}' uploaded successfully",
-                filename=file.filename,
-                notebook_id=nb_id,
-                source_id=source_id,
-            )
+        return UploadResponse(
+            message=f"File '{file.filename}' uploaded successfully",
+            filename=file.filename,
+            notebook_id="gemini-session",
+            source_id=source_id,
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -296,85 +268,57 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/api/add-text", response_model=AddTextResponse)
 async def add_text_source(request: AddTextRequest):
-    """
-    Feed raw text as a source to NotebookLM (like pasting text into NotebookLM).
-    The text is saved as a temporary .txt file and uploaded.
-    """
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
     title = request.title or f"Text-{uuid.uuid4().hex[:6]}"
-    temp_dir = tempfile.mkdtemp()
-    file_path = os.path.join(temp_dir, f"{title}.txt")
+    source_id = uuid.uuid4().hex[:8]
+    
+    session.add_source(source_id, "text", title, request.text[:200], content=request.text)
 
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(request.text)
-
-        async with await get_notebooklm_client() as client:
-            nb_id = await session.ensure_notebook(client)
-
-            print(f"Adding text source '{title}' to notebook {nb_id}...")
-            source = await client.sources.add_file(nb_id, file_path, wait=True)
-            source_id = getattr(source, 'id', str(source))
-
-            preview = request.text[:200].replace("\n", " ")
-            session.add_source(source_id, "text", title, preview)
-
-            return AddTextResponse(
-                message=f"Text source '{title}' added successfully",
-                source_id=source_id,
-                notebook_id=nb_id,
-                title=title,
-            )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        if os.path.exists(temp_dir):
-            os.rmdir(temp_dir)
+    return AddTextResponse(
+        message=f"Text source '{title}' added successfully",
+        source_id=source_id,
+        notebook_id="gemini-session",
+        title=title,
+    )
 
 
 # ─── Add URL Source ────────────────────────────────────────────────────────────
 
 @app.post("/api/add-url", response_model=AddUrlResponse)
 async def add_url_source(request: AddUrlRequest):
-    """
-    Add a URL as a source to NotebookLM (webpage, article, etc.).
-    """
     if not request.url.strip():
         raise HTTPException(status_code=400, detail="URL cannot be empty")
 
+    source_id = uuid.uuid4().hex[:8]
+
     try:
-        async with await get_notebooklm_client() as client:
-            nb_id = await session.ensure_notebook(client)
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(request.url, timeout=15.0)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            content = soup.get_text(separator='\n', strip=True)
 
-            print(f"Adding URL source '{request.url}' to notebook {nb_id}...")
-            source = await client.sources.add_url(nb_id, request.url, wait=True)
-            source_id = getattr(source, 'id', str(source))
+        session.add_source(source_id, "url", request.url, content[:200], content=content)
 
-            session.add_source(source_id, "url", request.url, request.url)
-
-            return AddUrlResponse(
-                message=f"URL source added successfully",
-                source_id=source_id,
-                notebook_id=nb_id,
-                url=request.url,
-            )
+        return AddUrlResponse(
+            message="URL source added successfully",
+            source_id=source_id,
+            notebook_id="gemini-session",
+            url=request.url,
+        )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Không thể đọc URL: {e}")
 
 
 # ─── List Sources ─────────────────────────────────────────────────────────────
 
 @app.get("/api/sources", response_model=SourceListResponse)
 async def list_sources():
-    """List all sources that have been added to the current notebook."""
     return SourceListResponse(
-        notebook_id=session.notebook_id,
+        notebook_id="gemini-session",
         sources=[SourceInfo(**s) for s in session.sources],
     )
 
@@ -383,60 +327,43 @@ async def list_sources():
 
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate_document(request: GenerateRequest):
-    """
-    Generate a Decree 30 compliant document using NotebookLM.
-    
-    Flow:
-    1. If sources were uploaded, first extract key data (Stage 1).
-    2. Use extracted data + user prompt to generate the document body (Stage 2).
-    """
-    nb_id = request.notebook_id or session.notebook_id
+    if not os.environ.get("GEMINI_API_KEY"):
+        raise HTTPException(status_code=500, detail="Chưa cấu hình GEMINI_API_KEY.")
 
     try:
-        async with await get_notebooklm_client() as client:
-            if not nb_id:
-                nb_id = await session.ensure_notebook(client)
+        model = genai.GenerativeModel("gemini-1.5-flash") # Or gemini-1.5-pro
+        
+        contents = []
+        # Append all sources
+        for src in session.sources:
+            if src.get("file_name"):
+                # Fetch the file object by name
+                f = genai.get_file(src["file_name"])
+                contents.append(f)
+            if src.get("content"):
+                contents.append(f"--- NGUỒN TÀI LIỆU: {src['name']} ---\n{src['content']}")
 
-            stage1_data = ""
-            conv_id = None
+        # Build prompt
+        generation_prompt = build_generation_prompt(
+            user_prompt=request.prompt,
+            document_type=request.document_type,
+        )
+        contents.append(generation_prompt)
 
-            # Stage 1: Extract data from sources (if any were uploaded)
-            if len(session.sources) > 0:
-                try:
-                    print("Running Stage 1: Data extraction from sources...")
-                    stage1_result = await client.chat.ask(nb_id, EXTRACTION_PROMPT)
-                    stage1_data = stage1_result.answer
-                    conv_id = stage1_result.conversation_id
-                    print(f"Stage 1 complete. Extracted {len(stage1_data)} chars.")
-                except Exception as e:
-                    print(f"Stage 1 skipped (error): {e}")
+        print("Sending generation request to Gemini...")
+        session.chat = model.start_chat(history=[])
+        response = session.chat.send_message(contents)
 
-            # Stage 2: Generate document body
-            print("Running Stage 2: Document generation...")
-            generation_prompt = build_generation_prompt(
-                user_prompt=request.prompt,
-                document_type=request.document_type,
-                stage1_data=stage1_data,
-            )
+        generated_text = clean_ai_html_output(response.text)
 
-            if conv_id:
-                stage2_result = await client.chat.ask(
-                    nb_id, generation_prompt, conversation_id=conv_id,
-                )
-            else:
-                stage2_result = await client.chat.ask(nb_id, generation_prompt)
-
-            generated_text = clean_ai_html_output(stage2_result.answer)
-            session.conversation_id = stage2_result.conversation_id
-            print(f"Stage 2 complete. Generated {len(generated_text)} chars.")
-
-            return GenerateResponse(
-                generated_text=generated_text,
-                notebook_id=nb_id,
-                conversation_id=stage2_result.conversation_id,
-            )
+        return GenerateResponse(
+            generated_text=generated_text,
+            notebook_id="gemini-session",
+            conversation_id="gemini-chat",
+        )
 
     except Exception as e:
+        print(f"Error generating: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -444,48 +371,26 @@ async def generate_document(request: GenerateRequest):
 
 @app.post("/api/refine", response_model=RefineResponse)
 async def refine_document(request: RefineRequest):
-    """
-    Refine/improve the generated document with a follow-up instruction.
-    This maintains conversation context with NotebookLM for iterative improvement,
-    similar to how you'd chat with NotebookLM to polish a result.
-    
-    Examples:
-    - "Thêm phần về dự toán ngân sách"
-    - "Chỉnh lại đoạn mở đầu cho trang trọng hơn"
-    - "Bổ sung căn cứ pháp lý Luật Ngân sách 2015"
-    - "Rút gọn phần II, chỉ giữ ý chính"
-    """
-    nb_id = request.notebook_id or session.notebook_id
-    conv_id = request.conversation_id or session.conversation_id
+    if not session.chat:
+        raise HTTPException(status_code=400, detail="Chưa có phiên làm việc nào. Hãy tạo văn bản trước.")
 
     try:
-        async with await get_notebooklm_client() as client:
-            if not nb_id:
-                nb_id = await session.ensure_notebook(client)
+        refinement_prompt = build_refinement_prompt(
+            instruction=request.instruction,
+            current_text=request.current_text,
+            document_type=request.document_type,
+        )
 
-            refinement_prompt = build_refinement_prompt(
-                instruction=request.instruction,
-                current_text=request.current_text,
-                document_type=request.document_type,
-            )
+        print(f"Refining document with Gemini...")
+        response = session.chat.send_message(refinement_prompt)
 
-            print(f"Refining document: '{request.instruction[:80]}...'")
+        refined_text = clean_ai_html_output(response.text)
 
-            if conv_id:
-                result = await client.chat.ask(
-                    nb_id, refinement_prompt, conversation_id=conv_id,
-                )
-            else:
-                result = await client.chat.ask(nb_id, refinement_prompt)
-
-            session.conversation_id = result.conversation_id
-            refined_text = clean_ai_html_output(result.answer)
-
-            return RefineResponse(
-                refined_text=refined_text,
-                notebook_id=nb_id,
-                conversation_id=result.conversation_id,
-            )
+        return RefineResponse(
+            refined_text=refined_text,
+            notebook_id="gemini-session",
+            conversation_id="gemini-chat",
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -495,7 +400,14 @@ async def refine_document(request: RefineRequest):
 
 @app.post("/api/reset", response_model=ResetResponse)
 async def reset_session():
-    """Reset the current session (clears notebook, sources, and conversation)."""
+    # Cleanup files on Gemini servers if possible
+    try:
+        for src in session.sources:
+            if src.get("file_name"):
+                genai.delete_file(src["file_name"])
+    except:
+        pass
+    
     session.reset()
     return ResetResponse(message="Session reset successfully")
 
