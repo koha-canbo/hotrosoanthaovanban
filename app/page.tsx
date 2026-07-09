@@ -381,7 +381,7 @@ export default function HomePage() {
   return (
     <main className="split-layout">
       {/* User bar */}
-      <div style={{ position: 'fixed', top: 12, right: 16, zIndex: 50 }}>
+      <div style={{ position: 'fixed', bottom: 16, left: 16, zIndex: 50 }}>
         <div className="user-bar">
           {user.photoURL && (
             <img
