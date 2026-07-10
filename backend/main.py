@@ -13,6 +13,37 @@ from bs4 import BeautifulSoup
 
 # Import Gemini SDK
 import google.generativeai as genai
+from google.generativeai.client import FileServiceClient
+import googleapiclient.http
+import googleapiclient.discovery
+import httplib2
+from typing import Sequence
+
+# Monkeypatch to support new Google "AQ." format API keys with the legacy SDK
+def patched_setup_discovery_api(self, metadata: Sequence[tuple[str, str]] = ()):
+    api_key = self._client_options.api_key
+    if api_key is None:
+        raise ValueError(
+            "Invalid operation: Uploading to the File API requires an API key. Please provide a valid API key."
+        )
+
+    # Omit key query parameter when fetching the discovery doc because it causes 400 for new "AQ." keys
+    discovery_url = "https://generativelanguage.googleapis.com/$discovery/rest?version=v1beta"
+    request = googleapiclient.http.HttpRequest(
+        http=httplib2.Http(),
+        postproc=lambda resp, content: (resp, content),
+        uri=discovery_url,
+        headers=dict(metadata),
+    )
+    response, content = request.execute()
+    request.http.close()
+
+    discovery_doc = content.decode("utf-8")
+    self._local.discovery_api = googleapiclient.discovery.build_from_document(
+        discovery_doc, developerKey=api_key
+    )
+
+FileServiceClient._setup_discovery_api = patched_setup_discovery_api
 
 # Load environment variables from .env.local
 from dotenv import load_dotenv
