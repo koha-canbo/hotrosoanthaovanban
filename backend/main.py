@@ -336,7 +336,7 @@ async def generate_document(request: GenerateRequest):
         raise HTTPException(status_code=500, detail="Chưa cấu hình GEMINI_API_KEY.")
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash") # Or gemini-1.5-pro
+        model = genai.GenerativeModel("gemini-2.5-flash") # Or gemini-2.5-pro
         
         contents = []
         # Append all sources
