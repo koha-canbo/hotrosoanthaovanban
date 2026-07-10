@@ -326,6 +326,22 @@ body {
   background: #f3f4f6;
 }
 
+/* Hide borders for header, signature, and other layout tables */
+.a4-paper .tiptap table.decree-header-table td,
+.a4-paper .tiptap table.decree-signature-table td,
+.a4-paper .tiptap table.border-none td,
+.a4-paper .tiptap table[border="0"] td,
+.a4-paper .tiptap table[style*="border: none"] td,
+.a4-paper .tiptap table[style*="border:none"] td,
+.a4-paper .tiptap table.decree-header-table th,
+.a4-paper .tiptap table.decree-signature-table th,
+.a4-paper .tiptap table.border-none th,
+.a4-paper .tiptap table[border="0"] th,
+.a4-paper .tiptap table[style*="border: none"] th,
+.a4-paper .tiptap table[style*="border:none"] th {
+  border: none !important;
+}
+
 .a4-paper .tiptap .is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   float: left;

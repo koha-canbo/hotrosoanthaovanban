@@ -110,26 +110,47 @@ def clean_ai_html_output(text: str) -> str:
 
     text = re.sub(r"<table[\s\S]*?</table>", stash_table, text, flags=re.IGNORECASE)
 
-    def add_indent_justify(m):
-        tag = m.group(0)
-        indent_justify = "text-indent:1.27cm;text-align:justify;"
-        if "text-indent" in tag:
-            if "text-align" not in tag and 'style="' in tag:
-                return tag.replace('style="', 'style="text-align:justify;')
-            return tag
-        if 'style="' in tag:
-            if "text-align" in tag:
-                return tag.replace('style="', 'style="text-indent:1.27cm;')
-            return tag.replace('style="', f'style="{indent_justify}')
-        if "style='" in tag:
-            if "text-align" in tag:
-                return tag.replace("style='", "style='text-indent:1.27cm;")
-            return tag.replace("style='", f"style='{indent_justify}")
-        if tag == "<p>":
-            return f'<p style="{indent_justify}">'
-        return tag.replace("<p", f'<p style="{indent_justify}"', 1)
+    def add_paragraph_styles(m):
+        tag_attrs = m.group(1) or ""
+        content = m.group(2)
+        
+        style_match = re.search(r"style=['\"]([^'\"]*)['\"]", tag_attrs)
+        style_content = style_match.group(1) if style_match else ""
+        
+        # Check if the paragraph is centered
+        is_centered = "text-align: center" in style_content or "text-align:center" in style_content
+        
+        # Check if paragraph content starts with Roman numerals (e.g. I., II., III.) or A-E followed by a dot
+        clean_text = re.sub(r"<[^>]+>", "", content).strip()
+        is_section_heading = bool(re.match(r"^(?:[I|V|X]+\.|[A-E]\.)\s", clean_text))
+        
+        if is_section_heading:
+            is_centered = False
+            # Clean centering from style and align left/justify with NO indent
+            style_content = re.sub(r"text-align:\s*center;?", "", style_content)
+            if "text-indent" not in style_content:
+                style_content = "text-align:justify;" + style_content
+        else:
+            if not is_centered:
+                if "text-indent" not in style_content:
+                    style_content = "text-indent:1.27cm;text-align:justify;" + style_content
+                elif "text-align" not in style_content:
+                    style_content = "text-align:justify;" + style_content
+                    
+        style_content = style_content.strip()
+        if style_content:
+            tag_attrs_clean = re.sub(r"style=['\"]([^'\"]*)['\"]", "", tag_attrs).strip()
+            new_tag = f"<p {tag_attrs_clean} style=\"{style_content}\"".replace("  ", " ").strip()
+        else:
+            new_tag = "<p"
+            if tag_attrs.strip():
+                new_tag += " " + tag_attrs.strip()
+                
+        if not new_tag.endswith(">"):
+            new_tag += ">"
+        return f"{new_tag}{content}</p>"
 
-    text = re.sub(r"<p(?:\s[^>]*)?>", add_indent_justify, text)
+    text = re.sub(r"<p(\s[^>]*)?>([\s\S]*?)</p>", add_paragraph_styles, text)
 
     # Restore table blocks (untouched)
     for block in table_blocks:
