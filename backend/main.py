@@ -91,6 +91,7 @@ def clean_ai_html_output(text: str) -> str:
         (r"CÔNG AN VIÊN", "CÁN BỘ"),
         (r"công an viên", "cán bộ"),
         (r"\s*\[\d+\]", ""),
+        (r"(?i)\[CẦN[\s_]BỔ[\s_]SUNG(?::[^\]]*)?\]", "......"),
     ]
 
     for pattern, replacement in replacements:
