@@ -300,8 +300,24 @@ async def upload_file(file: UploadFile = File(...)):
             fullText = [para.text for para in doc.paragraphs]
             content = '\n'.join(fullText)
             session.add_source(source_id, "file", file.filename, content[:200], content=content)
+        elif file.filename.lower().endswith(".pdf"):
+            print(f"Extracting PDF text locally: {file.filename}")
+            import pypdf
+            reader = pypdf.PdfReader(file_path)
+            fullText = []
+            for page in reader.pages:
+                text_content = page.extract_text()
+                if text_content:
+                    fullText.append(text_content)
+            content = '\n'.join(fullText)
+            session.add_source(source_id, "file", file.filename, content[:200], content=content)
+        elif file.filename.lower().endswith((".txt", ".csv", ".tsv")):
+            print(f"Reading text file locally: {file.filename}")
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            session.add_source(source_id, "file", file.filename, content[:200], content=content)
         else:
-            # For PDF, TXT, CSV, etc.
+            # Fallback to uploading to Gemini File API for other binary formats
             print(f"Uploading {file.filename} to Gemini...")
             genai_file = genai.upload_file(file_path, display_name=file.filename)
             session.add_source(source_id, "file", file.filename, "Tài liệu được tải lên Gemini (PDF/TXT)", file_name=genai_file.name)
