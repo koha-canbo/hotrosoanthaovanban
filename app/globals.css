@@ -258,6 +258,8 @@ body {
   line-height: 1.5;
   color: #000000;
   min-height: 250mm;
+  caret-color: red;
+  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'><line x1='4' y1='2' x2='12' y2='2' stroke='red' stroke-width='2'/><line x1='8' y1='2' x2='8' y2='22' stroke='red' stroke-width='2'/><line x1='4' y1='22' x2='12' y2='22' stroke='red' stroke-width='2'/></svg>") 8 12, text;
 }
 
 .a4-paper .tiptap p {
