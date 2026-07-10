@@ -14,6 +14,11 @@ from bs4 import BeautifulSoup
 # Import Gemini SDK
 import google.generativeai as genai
 
+# Load environment variables from .env.local
+from dotenv import load_dotenv
+env_path = Path(__file__).parent.parent / '.env.local'
+load_dotenv(dotenv_path=env_path)
+
 # Setup Gemini
 # The API key must be set in the environment variable GEMINI_API_KEY
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
