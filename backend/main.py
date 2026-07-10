@@ -126,10 +126,10 @@ def clean_ai_html_output(text: str) -> str:
         
         if is_section_heading:
             is_centered = False
-            # Clean centering from style and align left/justify with NO indent
+            # Clean centering from style and align left/justify with 1.27cm indent
             style_content = re.sub(r"text-align:\s*center;?", "", style_content)
             if "text-indent" not in style_content:
-                style_content = "text-align:justify;" + style_content
+                style_content = "text-indent:1.27cm;text-align:justify;" + style_content
         else:
             if not is_centered:
                 if "text-indent" not in style_content:
