@@ -3,12 +3,14 @@ import shutil
 import uuid
 import tempfile
 import re
+import asyncio
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
 import httpx
+import pypdf
 from bs4 import BeautifulSoup
 
 # Import Gemini SDK
@@ -277,14 +279,55 @@ async def health_check():
 
 # ─── Upload File Endpoint ─────────────────────────────────────────────────────
 
+# Maximum upload file size: 50MB
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024
+
+
+def _extract_pdf_text(file_path: str) -> str:
+    """Extract text from a PDF file. Runs in a thread pool to avoid blocking."""
+    try:
+        reader = pypdf.PdfReader(file_path)
+    except pypdf.errors.PdfReadError as e:
+        raise ValueError(f"File PDF bị hỏng hoặc không hợp lệ: {e}")
+    except Exception as e:
+        raise ValueError(f"Không thể đọc file PDF: {e}")
+
+    if reader.is_encrypted:
+        try:
+            reader.decrypt("")
+        except Exception:
+            raise ValueError("File PDF được bảo vệ bằng mật khẩu. Vui lòng mở khóa trước khi tải lên.")
+
+    full_text = []
+    total_pages = len(reader.pages)
+    for i, page in enumerate(reader.pages):
+        try:
+            text_content = page.extract_text()
+            if text_content:
+                full_text.append(text_content)
+        except Exception:
+            print(f"  Warning: Không thể đọc trang {i+1}/{total_pages}")
+            continue
+
+    return '\n'.join(full_text)
+
+
 @app.post("/api/upload", response_model=UploadResponse)
 async def upload_file(file: UploadFile = File(...)):
     """
-    Upload a reference file. Uses Gemini File API for PDF/TXT.
-    Extracts text locally for DOCX.
+    Upload a reference file. Extracts text locally for PDF/DOCX/TXT.
+    Falls back to Gemini File API for other binary formats.
     """
     if not os.environ.get("GEMINI_API_KEY"):
         raise HTTPException(status_code=500, detail="Chưa cấu hình GEMINI_API_KEY. Vui lòng thêm biến môi trường này.")
+
+    # Check file size early by reading the content
+    file_content = await file.read()
+    if len(file_content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File quá lớn ({len(file_content) / 1024 / 1024:.1f}MB). Giới hạn tối đa là {MAX_UPLOAD_SIZE // 1024 // 1024}MB."
+        )
 
     temp_dir = tempfile.mkdtemp()
     file_path = os.path.join(temp_dir, file.filename)
@@ -292,30 +335,37 @@ async def upload_file(file: UploadFile = File(...)):
 
     try:
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(file_content)
 
         if file.filename.lower().endswith(".docx"):
             import docx
             doc = docx.Document(file_path)
             fullText = [para.text for para in doc.paragraphs]
             content = '\n'.join(fullText)
+            if not content.strip():
+                raise HTTPException(status_code=400, detail="File DOCX không chứa nội dung văn bản nào.")
             session.add_source(source_id, "file", file.filename, content[:200], content=content)
+
         elif file.filename.lower().endswith(".pdf"):
             print(f"Extracting PDF text locally: {file.filename}")
-            import pypdf
-            reader = pypdf.PdfReader(file_path)
-            fullText = []
-            for page in reader.pages:
-                text_content = page.extract_text()
-                if text_content:
-                    fullText.append(text_content)
-            content = '\n'.join(fullText)
+            # Run blocking PDF extraction in a thread pool
+            content = await asyncio.to_thread(_extract_pdf_text, file_path)
+            if not content.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Không trích xuất được nội dung từ file PDF. "
+                           "File có thể là bản scan (ảnh chụp) hoặc không chứa văn bản."
+                )
             session.add_source(source_id, "file", file.filename, content[:200], content=content)
+
         elif file.filename.lower().endswith((".txt", ".csv", ".tsv")):
             print(f"Reading text file locally: {file.filename}")
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
+            if not content.strip():
+                raise HTTPException(status_code=400, detail="File văn bản rỗng, không có nội dung.")
             session.add_source(source_id, "file", file.filename, content[:200], content=content)
+
         else:
             # Fallback to uploading to Gemini File API for other binary formats
             print(f"Uploading {file.filename} to Gemini...")
@@ -329,13 +379,17 @@ async def upload_file(file: UploadFile = File(...)):
             source_id=source_id,
         )
 
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Upload error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Lỗi xử lý file: {e}")
     finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        # Use shutil.rmtree for reliable cleanup even if files remain
         if os.path.exists(temp_dir):
-            os.rmdir(temp_dir)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 # ─── Add Text Source ───────────────────────────────────────────────────────────
