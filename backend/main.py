@@ -284,7 +284,7 @@ MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 
 
 def _extract_pdf_text(file_path: str) -> str:
-    """Extract text from a PDF file. Runs in a thread pool to avoid blocking."""
+    """Extract text from a PDF file using pypdf. Runs in a thread pool to avoid blocking."""
     try:
         reader = pypdf.PdfReader(file_path)
     except pypdf.errors.PdfReadError as e:
@@ -312,11 +312,57 @@ def _extract_pdf_text(file_path: str) -> str:
     return '\n'.join(full_text)
 
 
+async def _ocr_pdf_with_gemini(file_path: str, filename: str) -> str:
+    """
+    Use Gemini's vision capability to OCR a scanned/image-based PDF.
+    Uploads the file to Gemini File API, then asks the model to extract all text.
+    """
+    print(f"  PDF scan detected — using Gemini OCR for: {filename}")
+    genai_file = None
+    try:
+        # Upload PDF to Gemini File API
+        genai_file = await asyncio.to_thread(
+            genai.upload_file, file_path, display_name=filename
+        )
+
+        # Use Gemini to extract text from the scanned PDF
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        ocr_prompt = (
+            "Hãy trích xuất TOÀN BỘ nội dung văn bản từ tài liệu PDF này. "
+            "Đây là tài liệu scan/ảnh chụp, hãy đọc kỹ từng trang và trả về "
+            "nội dung văn bản gốc một cách chính xác nhất có thể. "
+            "Giữ nguyên cấu trúc đoạn văn, số thứ tự, bảng biểu nếu có. "
+            "CHỈ trả về nội dung văn bản thuần túy, KHÔNG thêm bất kỳ nhận xét hay giải thích nào."
+        )
+
+        response = await asyncio.to_thread(
+            model.generate_content, [genai_file, ocr_prompt]
+        )
+
+        return response.text.strip() if response.text else ""
+
+    except Exception as e:
+        print(f"  Gemini OCR error: {type(e).__name__}: {e}")
+        raise ValueError(f"Không thể đọc file PDF scan bằng AI: {e}")
+    finally:
+        # Cleanup the uploaded file from Gemini servers
+        if genai_file:
+            try:
+                await asyncio.to_thread(genai.delete_file, genai_file.name)
+            except Exception:
+                pass
+
+
+# Minimum text length to consider pypdf extraction successful.
+# Below this threshold, we assume the PDF is scanned/image-based.
+MIN_TEXT_LENGTH = 50
+
+
 @app.post("/api/upload", response_model=UploadResponse)
 async def upload_file(file: UploadFile = File(...)):
     """
     Upload a reference file. Extracts text locally for PDF/DOCX/TXT.
-    Falls back to Gemini File API for other binary formats.
+    For scanned PDFs, uses Gemini vision OCR as fallback.
     """
     if not os.environ.get("GEMINI_API_KEY"):
         raise HTTPException(status_code=500, detail="Chưa cấu hình GEMINI_API_KEY. Vui lòng thêm biến môi trường này.")
@@ -347,14 +393,21 @@ async def upload_file(file: UploadFile = File(...)):
             session.add_source(source_id, "file", file.filename, content[:200], content=content)
 
         elif file.filename.lower().endswith(".pdf"):
-            print(f"Extracting PDF text locally: {file.filename}")
-            # Run blocking PDF extraction in a thread pool
+            print(f"Processing PDF: {file.filename}")
+
+            # Phase 1: Try fast local extraction with pypdf
             content = await asyncio.to_thread(_extract_pdf_text, file_path)
+
+            # Phase 2: If pypdf returned little/no text, use Gemini OCR
+            if len(content.strip()) < MIN_TEXT_LENGTH:
+                print(f"  pypdf extracted only {len(content.strip())} chars — falling back to Gemini OCR")
+                content = await _ocr_pdf_with_gemini(file_path, file.filename)
+
             if not content.strip():
                 raise HTTPException(
                     status_code=400,
                     detail="Không trích xuất được nội dung từ file PDF. "
-                           "File có thể là bản scan (ảnh chụp) hoặc không chứa văn bản."
+                           "File có thể bị hỏng hoặc không chứa văn bản có thể đọc được."
                 )
             session.add_source(source_id, "file", file.filename, content[:200], content=content)
 
